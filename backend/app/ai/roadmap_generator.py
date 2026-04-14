@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from datetime import date
 from typing import Optional
 
 from app.ai.llm_client import llm_complete
@@ -15,29 +16,39 @@ logger = logging.getLogger(__name__)
 # Prompt principal — sortie JSON stricte
 # ─────────────────────────────────────────────
 ROADMAP_SYSTEM_PROMPT = """You are an expert educational curriculum designer.
-Your task: analyze the provided document content and web research, then create 
-a structured revision roadmap for a student preparing for an exam.
+Analyze the provided exam/course material and create a personalized revision roadmap.
 
-Output ONLY valid JSON matching this exact schema (no markdown, no explanation):
+The roadmap MUST be adapted to the student's available study time.
+If time is short, reduce chapter count and focus on highest-importance topics.
+If time allows, provide comprehensive coverage.
+
+Output ONLY valid JSON:
 {
-  "title": "string — concise roadmap title",
+  "title": "string",
+  "estimated_total_hours": 20.0,
   "chapters": [
     {
       "order_index": 1,
-      "title": "string — chapter title",
-      "objective": "string — what the student will master (one sentence)",
-      "importance": 1.5
+      "title": "string",
+      "objective": "string",
+      "importance": 2.0,
+      "estimated_hours": 3.0
     }
   ]
 }
 
 Rules:
-- Generate 5 to 10 chapters depending on document complexity
-- importance: float between 0.5 (minor topic) and 3.0 (exam critical)
-- Order chapters logically: prerequisites before advanced topics
-- Base chapter titles on the actual document content
-- Enrich with web research but stay grounded in the uploaded material
+- importance: 0.5 (minor) → 3.0 (exam-critical)
+- estimated_hours: realistic study time per chapter
+- Sum of estimated_hours should match available study time
+- Order: prerequisites before advanced topics
+- Base content on the uploaded exam material — web is supplementary only
 - All text in English
+
+IMPORTANT (Order of Priority):
+  Priority 1: The uploaded EXAM (determine the syllabus from it). 
+  Priority 2: The provided NOTES (use them to fill the gaps).
+  Priority 3: The sources from web search
 """
 
 
@@ -88,14 +99,13 @@ Generate the revision roadmap based on this material.
 # Cache : même document = même roadmap
 # ─────────────────────────────────────────────
 
+
 def _compute_content_hash(text: str) -> str:
     """Hash SHA256 des 10 000 premiers caractères du texte extrait."""
     return hashlib.sha256(text[:10000].encode()).hexdigest()[:16]
 
 
-def _get_cached_roadmap(
-    project_id: str, content_hash: str
-) -> Optional[dict]:
+def _get_cached_roadmap(project_id: str, content_hash: str) -> Optional[dict]:
     """
     Vérifie si une roadmap existe déjà pour ce hash de contenu.
     Évite de régénérer à chaque appel pour le même document.
@@ -115,6 +125,7 @@ def _get_cached_roadmap(
 # ─────────────────────────────────────────────
 # Pipeline principal
 # ─────────────────────────────────────────────
+
 
 async def generate_roadmap(
     project_id: str,
@@ -164,7 +175,9 @@ async def generate_roadmap(
     # ── 3. Récupère les infos du projet (subject, exam_type) ──
     project_result = (
         supabase.table("projects")
-        .select("title, subject, target_exam_type")
+        .select(
+            "title, subject, target_exam_type, deadline, hours_per_day, days_per_week"
+        )
         .eq("id", project_id)
         .single()
         .execute()
@@ -173,8 +186,30 @@ async def generate_roadmap(
     subject = project.get("subject", "")
     exam_type = project.get("target_exam_type", "")
 
+    # Exploitation du deadline
+    deadline = project.get("deadline")
+    hours_per_day = project.get("hours_per_day", 2.0)
+    days_per_week = project.get("days_per_week", 5)
+
+    study_plan_context = ""
+    if deadline:
+        from datetime import date
+
+        try:
+            deadline_date = date.fromisoformat(str(deadline))
+            days_remaining = (deadline_date - date.today()).days
+            total_hours = days_remaining * (days_per_week / 7) * hours_per_day
+            study_plan_context = (
+                f"Days until exam: {days_remaining}\n"
+                f"Study hours per day: {hours_per_day}\n"
+                f"Study days per week: {days_per_week}\n"
+                f"Total estimated study hours available: {total_hours:.0f}h"
+            )
+        except Exception:
+            pass
+        
     # ── 4. Enrichissement web ────────────────────────────
-    search_queries = _build_search_queries(extracted_text, subject, exam_type)
+    search_queries = _build_search_queries(extracted_text, subject, exam_type) + study_plan_context
     web_sources = []
     try:
         web_sources = await enrich_with_web(
@@ -221,6 +256,7 @@ async def generate_roadmap(
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
+
 
 def _build_search_queries(
     extracted_text: str,
@@ -301,13 +337,15 @@ def _save_roadmap_to_db(
     roadmap_id = str(uuid.uuid4())
 
     # Insère la roadmap
-    supabase.table("roadmaps").insert({
-        "id": roadmap_id,
-        "project_id": project_id,
-        "title": roadmap.title,
-        "status": "ready",
-        "doc_content_hash": content_hash,
-    }).execute()
+    supabase.table("roadmaps").insert(
+        {
+            "id": roadmap_id,
+            "project_id": project_id,
+            "title": roadmap.title,
+            "status": "ready",
+            "doc_content_hash": content_hash,
+        }
+    ).execute()
 
     # Insère les chapitres
     chapter_rows = [
@@ -321,9 +359,7 @@ def _save_roadmap_to_db(
         }
         for ch in roadmap.chapters
     ]
-    chapters_result = (
-        supabase.table("chapters").insert(chapter_rows).execute()
-    )
+    chapters_result = supabase.table("chapters").insert(chapter_rows).execute()
 
     # Reconstruit la RoadmapSchema avec les vrais IDs
     saved_chapters = [
@@ -347,6 +383,7 @@ def _save_roadmap_to_db(
 def _db_to_roadmap_schema(data: dict) -> RoadmapSchema:
     """Convertit un dict DB (avec chapters imbriqués) en RoadmapSchema."""
     import uuid
+
     chapters = [
         ChapterSchema(
             id=uuid.UUID(ch["id"]),

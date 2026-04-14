@@ -2,7 +2,7 @@ import uuid
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.core.deps import get_current_user
-from app.db.supabase_client import supabase
+from app.services.project_service import ProjectService
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -10,6 +10,8 @@ from datetime import datetime
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+
+# ── Schemas ──────────────────────────────────────────────
 
 class ProjectCreateRequest(BaseModel):
     title: str
@@ -26,65 +28,39 @@ class ProjectSchema(BaseModel):
     created_at: Optional[datetime] = None
 
 
-@router.post(
-    "",
-    response_model=ProjectSchema,
-    status_code=status.HTTP_201_CREATED,
-    summary="Crée un nouveau projet",
-)
+# ── Routes ───────────────────────────────────────────────
+
+@router.post("", response_model=ProjectSchema, status_code=status.HTTP_201_CREATED)
 async def create_project(
     request: ProjectCreateRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    result = supabase.table("projects").insert({
-        "user_id": current_user["user_id"],
-        "title": request.title,
-        "subject": request.subject,
-        "target_exam_type": request.target_exam_type,
-    }).execute()
+    try:
+        project = ProjectService.create(
+            user_id=current_user["user_id"],
+            title=request.title,
+            subject=request.subject,
+            target_exam_type=request.target_exam_type,
+        )
+        return project
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    if not result.data:
-        raise HTTPException(status_code=500, detail="Erreur création projet")
 
-    return result.data[0]
-
-
-@router.get(
-    "",
-    response_model=list[ProjectSchema],
-    summary="Liste les projets de l'utilisateur",
-)
+@router.get("", response_model=list[ProjectSchema])
 async def list_projects(current_user: dict = Depends(get_current_user)):
-    result = (
-        supabase.table("projects")
-        .select("*")
-        .eq("user_id", current_user["user_id"])
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return result.data or []
+    return ProjectService.get_all_by_user(current_user["user_id"])
 
 
-@router.get(
-    "/{project_id}",
-    response_model=ProjectSchema,
-    summary="Récupère un projet par ID",
-)
+@router.get("/{project_id}", response_model=ProjectSchema)
 async def get_project(
     project_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ):
-    result = (
-        supabase.table("projects")
-        .select("*")
-        .eq("id", str(project_id))
-        .eq("user_id", current_user["user_id"])
-        .single()
-        .execute()
-    )
-    if not result.data:
+    project = ProjectService.get_by_id(str(project_id), current_user["user_id"])
+    if not project:
         raise HTTPException(status_code=404, detail="Projet introuvable")
-    return result.data
+    return project
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -92,15 +68,6 @@ async def delete_project(
     project_id: uuid.UUID,
     current_user: dict = Depends(get_current_user),
 ):
-    result = (
-        supabase.table("projects")
-        .select("id")
-        .eq("id", str(project_id))
-        .eq("user_id", current_user["user_id"])
-        .single()
-        .execute()
-    )
-    if not result.data:
+    deleted = ProjectService.delete(str(project_id), current_user["user_id"])
+    if not deleted:
         raise HTTPException(status_code=404, detail="Projet introuvable")
-
-    supabase.table("projects").delete().eq("id", str(project_id)).execute()

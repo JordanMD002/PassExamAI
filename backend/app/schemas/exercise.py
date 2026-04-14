@@ -25,6 +25,10 @@ class ExerciseSchema(BaseModel):
     expected_answer_schema: Optional[List[RubricStep]] = None
     difficulty: int = Field(default=2, ge=1, le=3)
 
+class ExerciseRequest(BaseModel):
+    count: int = 5
+    types: Optional[list[str]] = None
+
 
 class GradingResult(BaseModel):
     exercise_id: Optional[uuid.UUID] = None
@@ -33,3 +37,7 @@ class GradingResult(BaseModel):
     feedback: str
     correct_answer: Optional[str] = None
     improvement_suggestions: List[str] = []
+    
+
+class GradeRequest(BaseModel):
+    answer: str

@@ -22,3 +22,7 @@ class LessonSchema(BaseModel):
     examples: List[ExampleSchema] = []
     source_references: List[SourceReference] = []
     visual_aids_description: Optional[str] = None
+    
+    
+class LessonRequest(BaseModel):
+    use_web_enrichment: bool = True

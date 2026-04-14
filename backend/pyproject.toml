@@ -30,6 +30,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "python-dotenv>=1.0.0",
     "tenacity>=8.3.0",   # retry logic
+    "google-generativeai>=0.8.6",
+    "black>=26.3.1",
 ]
 
 [build-system]
